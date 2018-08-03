@@ -1,0 +1,20 @@
+Package: nytaxi
+Type: Package
+Title: Analyzes New York Green Taxi Dataset
+Version: 0.1.0
+Author: Alaa Abdelfattah
+Maintainer: Alaa Abdelfattah <al373480@uji.es>
+Description: Does analysis to the New York Green Taxi dataset. Finds correlations among data elements like tips, trip distances, pickup locations and drop off locations.
+License: GPL-3
+Encoding: UTF-8
+LazyData: true
+Imports:
+    sf,
+    methods,
+    sp,
+    rgdal
+RoxygenNote: 6.0.1
+Suggests: 
+    knitr,
+    rmarkdown
+VignetteBuilder: knitr

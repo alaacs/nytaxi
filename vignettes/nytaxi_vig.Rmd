@@ -1,0 +1,228 @@
+---
+title: "New York Taxi Tip Pattern Analysis Vignette"
+author: "Alaa Abdelfattah"
+date: "`r Sys.Date()`"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Vignette Title}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+```
+
+<style type="text/css">
+table {
+
+    width: 90%!important;
+
+}
+table tr td:first-child
+{
+  width: 20%!important;
+}
+table tr td:last-child
+{
+  width: 80%!important;
+}
+</style>
+
+```{r}
+library(nytaxi)
+```
+
+##Introduction and Motivation
+New York taxi trip data is publicly available on [NYC Taxi & Limousine Commission website](http://www.nyc.gov/html/tlc/html/about/trip_record_data.shtml). The analysis in this vignette and in this package is tailored for the green taxi data. I chose to work on green taxi trip data because the dataset is richer as it includes more information about the trips in more columns or data fields, includes pickup location, drop off location, fare information, number of passengers, etc.—will explain the fields further in the vignette.
+
+The data is available for each month of the year since August 2013 (for the green taxi) until December 2017
+
+The dataset includes fields for fare amount and tip amount and I was interested in knowing the patterns when people tend to pay more tips or less tips, is it related to certain time of day, day of week, or just the place, therefore my analysis is focused on exploring the data to try to uncover these patterns.
+
+##Data Description
+The dataset comes with a useful [data dictionary from NYC Taxi & Limousine Commission website](http://www.nyc.gov/html/tlc/downloads/pdf/data_dictionary_trip_records_green.pdf). The fields I am using in my analysis are:
+
+Field | Description
+------------- | -------------
+lpep_pickup_datetime | The date and time when the meter was engaged
+lpep_dropoff_datetime | The date and time when the meter was disengaged
+PULocationID | TLC Taxi Zone in which the taximeter was engaged
+DOLocationID | TLC Taxi Zone in which the taximeter was disengaged
+Fare_amount | The time-and-distance fare calculated by the meter
+Tip_amount | This field is automatically populated for credit card tips. Cash tips are not included
+
+New York City is divided into boroughs, precisely 6 boroughs (Bronx, Brooklyn, EWR, Manhattan, Queens, and Staten Island), and each of these boroughs is divided into further zones which the fields (PULocationID, and DOLocationID) are referring to.
+
+Comes with the dataset a shapefile that has zones information, because I believe for privacy reasons, the exact locations of pickup and drop off are not included in the main dataset, however, instead there exist the zoneIDs, which are foreign keys to the records in the zones shapefile. e.g. for one trip the PULocationID is equal to 43, after doing a lookup in the zone shape file, zoneID 43 is "Central Park" zone in Manhattan borough.
+
+I created also a shapefile for the boroughs as there will be analysis based on the boroughs.
+
+```{r fig.width = 7}
+library(rgdal)
+zones_newyork = download_NY_zones()
+spplot(zones_newyork, c("borough"), names.attr = c("borough"),
+       colorkey=list(space="right"), scales = list(draw = F),
+       main = "New York Zones / Boroughs",
+       as.table = TRUE)
+```
+
+
+
+The first method in nytaxi package is the function which reads data, the function accepts one parameter which is the url of the taxi trip data file in csv format which can be directly downloaded from NYC Taxi & Limousine Commission website.
+If this parameter is not passed, the package will load the example file which is included inside the package extdata and it is a minimized version of the taxi trip data file, as usually the files downloaded from the website are relatively large.
+```{r}
+#will download the file from the internet for the analysis, the file size is ~91 MB, so this might take some time!
+taxidata = nytaxi::read_NYC_trip_dataset("https://s3.amazonaws.com/nyc-tlc/trip+data/green_tripdata_2017-01.csv")
+#For a quick view this line if code reads a sample file instead
+# taxidata = read_NYC_trip_dataset()
+head(taxidata)
+```
+
+##Data Exploration
+The taxi trip dataset is available per month as CSV files on NYC Taxi & Limousine Commission website. I chose one dataset to do my analysis on which is for January 2017(it has 107,0261 trip records ) and my selection was arbitrary since later any selected dataset for green taxi trip data can also be applied for analysis.
+
+First off I will explore the nature of the data and if any anomalies exist
+As mentioned in the data dictionary, `tip_amount` field (the focus of my analysis) is only recorded for the payment with credit card, for that I will only do my analysis on the credit card payments.
+```{r}
+taxidata = taxidata[taxidata$payment_type == 1,]
+```
+
+```{r fig.width = 7}
+boxplot(taxidata$fare_amount, horizontal = T)
+#Number of values below or equal to 0 or above $50
+#length(taxidata$fare_amount[taxidata$fare_amount <= 0])
+```
+As seen here obvious there's some zero and negative fare amount data, and this might be a reason of machine errors, also there's a lot of anomalies above $25 therefore I will not consider these records in my analysis. Perhaps for future work they can be further explored independently.
+```{r fig.width = 7}
+taxidata = taxidata[taxidata$fare_amount > 0 & taxidata$fare_amount < 25,]
+boxplot(taxidata$fare_amount, horizontal = T)
+```
+
+Then inspect the tip amount values:
+```{r fig.width = 7}
+boxplot(taxidata$tip_amount, horizontal = T)
+```
+
+Also here it's visible that the there's some data anomalies as only in exceptional cases people tend to pay more than $5 tip amount, therefore I will remove these anomalies from my analysis
+```{r fig.width = 7}
+taxidata = taxidata[taxidata$tip_amount < 5,]
+boxplot(taxidata$tip_amount, horizontal = T)
+```
+At this point I removed the records that are not useful for my analysis, and most of the data outliers.
+Here I will perform dataset preprocessing as preparation for analysis, this includes
+
+* Making sure necessary columns are not included in the dataset
+* Parsing date fields into POSIXlt date for fututre manipulation
+* Calculating tip-fare ratio in a new column inside the result dataset
+* Reading the zones shapefile that has the IDs, Names, geometry of the zones, and the borough they fill in
+* Creating two columns for the pick location's and drop off location's borough names
+* Creating a column for the date part at which each trip ended, possible values: 
+
+Value | Description
+------------- | -------------
+Early Morning | from 05:00 to 08:00
+Morning | from 08:00 to 10:00
+Late Morning | from 10:00 to 12:00
+Afternoon | from 12:00 to 15:00
+Late Afternoon | from 15:00 to 17:00
+Early Evening | from 17:00 to 19:00
+Evening | from 19:00 to 21:00
+Night | from 21:00 to 00:00
+After Midnight | from 00:00 to 05:00
+```{r}
+taxidata = preprocess_dataset(taxidata, zones_newyork)
+head(taxidata)
+```
+
+In the analysis I will be working on the tip-fare ratio which is the tip_amount divided by the fare_amount for normalization.
+The tip-fare-ratio column was created in the preprocessing method.
+I will look closely on tip-fare ration column for the records I have:
+```{r fig.width=7}
+histdata = hist(taxidata$tip_fare_ratio, main = "Tip-fare Ratio", xlab = "Tip-fare Ratio")
+histdata
+```
+From the histogram it's visible that 99.6% of the data lies between the first two breaks, since my analysis later will be based on means of the tip-fare ratio I will remove these outliers further
+```{r fig.width=7}
+taxidata = taxidata[taxidata$tip_fare_ratio < 0.5,]
+hist(taxidata$tip_fare_ratio, main = "Tip-fare Ratio", xlab = "Tip-fare Ratio" )
+```
+
+At this point my data records are ready for the analysis.
+My analysis will be looking at the data at the borough level by having the mean values for:
+
+* Different days of the weeks
+* Different parts of the day
+* Either weekdays or weekends
+
+First I will create the borough features, by using `create_borough_features` function from nytaxi package that creates borough features by unioning and simplifying zones features and grouping by borough
+```{r fig.width = 7, fig.height=8}
+zones_shapefile = download_NY_zones(as_sf = TRUE)
+boroughs = create_borough_features(zones_shapefile)
+spplot(boroughs)
+
+```
+
+Then will use the boroughs SpatialPolygonsDataFrame to append borough level aggregated data for times of day, days of week, and for weekend/non-weekend times, to see if there's any pattern of the tip-fare ratio following these properties
+Will use `get_boroughs_with_aggregate_trip_data` from nytaxi package to do the aggregation
+```{r}
+boroughs = nytaxi::get_boroughs_with_aggregate_trip_data(taxidata, boroughs)
+head(boroughs@data)
+
+```
+
+##Analysis Results and Conclusions
+
+####Mean Tip-ratio by boroughs and days of week
+```{r fig.height=10, fig.width=7}
+colfunc  = grDevices::colorRampPalette(c("red", "orange", "blue"))
+spplot(boroughs, c("Sunday_mean_tip_fair_ratio", "Monday_mean_tip_fair_ratio", "Tuesday_mean_tip_fair_ratio",
+  "Wednesday_mean_tip_fair_ratio", "Thursday_mean_tip_fair_ratio", "Friday_mean_tip_fair_ratio",
+  "Saturday_mean_tip_fair_ratio"),
+  names.attr = c("Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"),
+  colorkey=list(space="right"), scales = list(draw = F),
+  col.regions = colfunc(20),
+  #at = seq(0, 2, by = 0.1),
+  main = "New York Boroughs/Days of Week",
+as.table = TRUE)
+```
+
+From the figure it can be seen the tip-fare ratio for taxi trips ended in Staten Island(South West) and Bronx in the north are the minimum regardess of the day of week, nonetheless passengers at Staten Island are the greediest on Tuesdays. Manhattan and QUeens tip-fare ratio show kind of relatively generous and stable pattern regardless the day of the week. Brooklyn rides they look like making the taxi drivers happy as they are the most generous showing the highest values on Sundays and Wednesdays.
+
+####Mean Tip-fare ratio by boroughs and times of day
+```{r fig.height=10, fig.width=7}
+spplot(boroughs, c("EarlyMorning_mean_tip_fair_ratio", "Morning_mean_tip_fair_ratio", "LateMorning_mean_tip_fair_ratio",
+  "Afternoon_mean_tip_fair_ratio", "LateAfternoon_mean_tip_fair_ratio", "EarlyEvening_mean_tip_fair_ratio",
+  "Evening_mean_tip_fair_ratio", "Night_mean_tip_fair_ratio" , "AfterMidnight_mean_tip_fair_ratio"),
+  names.attr = c("Early Morning", "Morning", "Late Morning", "Afternoon", "Late Afternoon", 
+                 "Early Evening", "Evening", "Night" ,"After Midnight"),
+  colorkey=list(space="right"), scales = list(draw = F),
+  col.regions = colfunc(20),
+  main = "New York Boroughs/Parts of day",
+as.table = TRUE)
+```
+
+Part of the day can affect how people are willing to give away some money as tips. Manhattan, Queens, and Brooklyn it can be seen they tend to pay more tip amounts relatie to their fare the later in the day it gets so at the evenings they tend to pay the maximum, and then a bit less in the night and after midnight.
+
+####Mean Tip-fare ratio by boroughs and weekdays/weekends
+```{r fig.height=10, fig.width=7}
+spplot(boroughs, c("weekday_mean_tip_fare_ratio", "weekend_mean_tip_fare_ratio"),
+  names.attr = c("Weekday", "Weekend"),
+  colorkey=list(space="right"), scales = list(draw = F),
+  col.regions = colfunc(30),
+  main = "New York Boroughs/Weekdays and Weekend",
+as.table = TRUE)
+```
+
+Weekends or weekdays mean tip-fare ratio don't show a big difference
+
+
+
+##Future Work
+* This analysis was based on one of the months the data is available for the NYC taxi trips, later work can also take into considerations other months
+* The package is strict about the dataset scheme following the data dictionary provided on NYC Taxi & Limousine Commission website however some of the taxi trip data available from older months have different schema. Future work can make the package more flexible to be able to analyse any of these datasets available
+* Future work also can focus on analysing the outliers independently to figure out any pattern that can lead to an exceptional tip-fare ratio
+* Furthermore additonal work can look into different sociological or socioeconomic aspects in different boroughs that can relate to this analysis.
